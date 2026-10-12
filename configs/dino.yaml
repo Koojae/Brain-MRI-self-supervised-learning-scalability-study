@@ -1,0 +1,86 @@
+# DINO (DINOv2-style): self-distillation with multi-crop views, iBOT patch prediction and a
+# KoLeo regulariser; the teacher is an EMA of the student.
+# This template holds the ViT-Base values.  launch.py sets arch, qk_norm, base_lr,
+# index_json, total_steps and run_dir; train.py reads only the resolved file.
+
+method: dino
+
+# ── encoder ──
+arch: base                     # tiny | base | huge (set by launch.py)
+in_chans: 1                    # input channels (one MRI contrast)
+patch_size: 16                 # cubic patch edge; a 96^3 global crop gives 6^3 = 216 tokens
+valid_token_threshold: 0.1     # a token is brain-valid when >= 10% of its voxels are brain
+qk_norm: false                 # per-head LayerNorm on q and k (launch.py: on for ViT-Huge)
+qk_norm_eps: 1.0e-2            # LayerNorm eps of the q/k normalisation
+grad_checkpointing: false      # recompute block activations in backward (memory only)
+
+# ── multi-crop views (random resized crops centred on brain voxels) ──
+n_global: 2                    # global crops per volume (student and teacher)
+n_local: 8                     # local crops per volume (student only)
+global_size: 96                # global crop edge after resize
+local_size: 48                 # local crop edge after resize (3^3 tokens)
+global_scale_range: [0.5, 1.0] # window edge = scale * longest volume axis
+local_scale_range: [0.2, 0.5]
+
+# ── heads (student and teacher DINO head, student and teacher iBOT head) ──
+dino_head_n_prototypes: 65536  # output dimension of the DINO head
+ibot_head_n_prototypes: 65536  # output dimension of the iBOT head
+head_nlayers: 3                # MLP layers in each head
+head_hidden_dim: 2048          # MLP hidden width
+head_bottleneck_dim: 256       # bottleneck before the weight-normalised prototype layer
+
+# ── losses ──
+student_temp: 0.1              # student softmax temperature
+sinkhorn_iterations: 3         # Sinkhorn-Knopp iterations for teacher centering
+koleo_weight: 0.1              # weight of the KoLeo loss on the global class tokens
+warmup_teacher_temp: 0.04      # teacher temperature at step 0
+teacher_temp: 0.07             # teacher temperature after the warm-up
+warmup_teacher_temp_frac: 0.3  # fraction of total_steps over which the teacher temperature ramps linearly
+freeze_last_layer_steps: 1500  # steps during which the prototype layers receive no update
+
+# ── iBOT masking (candidates are brain-valid tokens of the global crops) ──
+ibot_mask_ratio_min_max: [0.2, 0.75]  # masked fraction drawn uniformly per masked crop
+ibot_mask_sample_probability: 0.5     # probability that a global crop is masked at all
+
+# ── teacher EMA ──
+ema_start: 0.992               # momentum at step 0
+ema_end: 1.0                   # momentum at the last step
+ema_schedule: cosine           # const | cosine
+
+# ── augmentation (GPU, per crop; probabilities are per sample) ──
+aug:
+  flip_p: 0.5                  # flip probability per spatial axis
+  rotate_p: 0.5                # 90-degree rotation probability per axis pair
+  noise_p: 0.5                 # additive Gaussian noise, std ~ U[0, noise_std]
+  noise_std: 0.05
+  blur_p: 0.5                  # Gaussian blur, sigma ~ U[blur_sigma] voxels
+  blur_sigma: [0.25, 1.0]
+  gamma_p: 0.5                 # gamma contrast, exponent ~ U[gamma]
+  gamma: [0.5, 2.0]
+  hist_shift_p: 0.5            # monotone piecewise-linear intensity remap (10 control points, +-30%)
+
+# ── data ──
+index_json: null               # JSON list of .b2nd volume paths (set by launch.py)
+batch_size_per_gpu: 64         # volumes per GPU per micro-batch (x 10 crops)
+grad_accum: 1                  # micro-batches per optimizer step
+num_workers: 4                 # DataLoader workers per rank
+
+# ── optimizer (AdamW, eps 1e-8; student backbone + both student heads) ──
+base_lr: 1.0e-4                # peak_lr = base_lr * volumes_per_step / 256
+weight_decay: 0.04             # constant; applied to tensors with ndim >= 2 only
+adamw_beta1: 0.9
+adamw_beta2: 0.999
+patch_embed_lr_mult: 0.2       # learning-rate multiplier of the patch embedding
+clip_grad: 3.0                 # global gradient-norm clip, every step
+
+# ── schedule ──
+warmup_frac: 0.1               # linear warm-up over this fraction of total_steps
+min_lr: 1.0e-6                 # absolute floor of the cosine decay
+total_steps: null              # optimizer steps (set by launch.py from --epochs)
+
+# ── run ──
+run_dir: null                  # output directory (set by launch.py)
+seed: 42                       # base seed; per-rank generators derive from it: seed + rank (torch / NumPy / Python / augmentation), seed * 1000 + rank (crop sampling), seed * 7 + rank (iBOT masks)
+log_every: 20                  # steps between log lines
+feat_every: 200                # steps between feature-rank / attention diagnostics
+ckpt_every_steps: 5000         # steps between rolling resume checkpoints

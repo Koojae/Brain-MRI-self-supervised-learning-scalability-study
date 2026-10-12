@@ -1,0 +1,85 @@
+# JEPA ("JEPA-96"): predict target-encoder features of masked regions from a context view,
+# on whole-volume 96^3 resizes, with two-way block masking.
+# This template holds the ViT-Base values.  launch.py sets arch, the predictor size, qk_norm,
+# base_lr, index_json, total_steps and run_dir; train.py reads only the resolved file.
+
+method: jepa
+
+# ── encoder ──
+arch: base                     # tiny | base | huge (set by launch.py)
+in_chans: 1                    # input channels (one MRI contrast)
+img_size: 96                   # whole volume zero-padded to a cube and resized to img_size^3
+patch_size: 16                 # cubic patch edge; (96 / 16)^3 = 6^3 = 216 tokens
+valid_token_threshold: 0.1     # a token is brain-valid when >= 10% of its voxels are brain
+qk_norm: false                 # per-head LayerNorm on q and k (launch.py: on for ViT-Huge)
+qk_norm_eps: 1.0e-2            # LayerNorm eps of the q/k normalisation
+grad_checkpointing: false      # recompute block activations in backward (memory only)
+
+# ── predictor ──
+pred_embed_dim: 384            # predictor width (tiny 192 / base 384 / huge 384, set by launch.py)
+pred_depth: 6                  # predictor blocks (tiny 4 / base 6 / huge 12)
+pred_num_heads: 12             # predictor heads (tiny 6 / base 12 / huge 12; head_dim 32)
+num_mask_tokens: 1             # one learnable mask token (one target region per sample)
+loss_exp: 1.0                  # loss = mean |pred - target| ** loss_exp (1.0 = L1)
+
+# ── masking: two ways, one drawn per sample; blocks are sampled over brain-valid tokens ──
+mask:
+  - hw_block_scale: [0.7, 0.7]     # block size as a fraction of the brain-valid tokens (HW area x full depth; large block)
+    aspect_ratio: [0.3, 3.0]       # block aspect-ratio range
+    npred: 1                       # blocks per target
+    switch_enc_pred: false         # false: the block union is the target, the rest is context
+    enc_mask_scale: 0.25           # intended context size as a fraction of the brain-valid tokens (when the context exceeds it, one slab of depth slices is removed to approach it; also the split ratio of the deterministic fallback)
+    patch_drop_rate: 0.2           # extra random drop of context tokens
+    full_depth: true               # informational: blocks always span the full depth axis (the value is not used)
+  - hw_block_scale: [0.25, 0.25]   # small block (same units)
+    aspect_ratio: [0.3, 3.0]
+    npred: 1
+    switch_enc_pred: true          # true: the block is the context, the rest is the target
+    enc_mask_scale: 0.25
+    patch_drop_rate: 0.2
+    full_depth: true               # informational (same as above)
+pad_enc: 64                    # fixed context length (padding slots are excluded from attention and loss)
+pad_pred: 192                  # fixed target length; batch-max fallback with a counter if exceeded
+
+# ── target encoder EMA ──
+ema_start: 0.99925             # momentum at step 0
+ema_end: 0.99925               # momentum at the last step
+ema_schedule: const            # const | cosine
+
+# ── augmentation (GPU, after the resize; probabilities are per sample) ──
+aug:
+  flip_p: 0.5                  # flip probability per spatial axis
+  rotate_p: 0.5                # 90-degree rotation probability per axis pair
+  noise_p: 0.5                 # additive Gaussian noise, std ~ U[0, noise_std]
+  noise_std: 0.05
+  blur_p: 0.5                  # Gaussian blur, sigma ~ U[blur_sigma] voxels
+  blur_sigma: [0.25, 1.0]
+  gamma_p: 0.5                 # gamma contrast, exponent ~ U[gamma]
+  gamma: [0.5, 2.0]
+  hist_shift_p: 0.5            # monotone piecewise-linear intensity remap (10 control points, +-30%)
+
+# ── data ──
+index_json: null               # JSON list of .b2nd volume paths (set by launch.py)
+batch_size_per_gpu: 64         # volumes per GPU per micro-batch
+grad_accum: 1                  # micro-batches per optimizer step
+num_workers: 4                 # DataLoader workers per rank
+
+# ── optimizer (AdamW, eps 1e-8; encoder + predictor) ──
+base_lr: 1.0e-4                # peak_lr = base_lr * volumes_per_step / 256
+weight_decay: 0.04             # constant; applied to tensors with ndim >= 2 only
+adamw_beta1: 0.9
+adamw_beta2: 0.999
+patch_embed_lr_mult: 0.2       # learning-rate multiplier of the patch embedding
+clip_grad: 3.0                 # global gradient-norm clip, every step
+
+# ── schedule ──
+warmup_frac: 0.1               # linear warm-up over this fraction of total_steps
+min_lr: 1.0e-6                 # absolute floor of the cosine decay
+total_steps: null              # optimizer steps (set by launch.py from --epochs)
+
+# ── run ──
+run_dir: null                  # output directory (set by launch.py)
+seed: 42                       # base seed; each rank uses seed + rank
+log_every: 20                  # steps between log lines
+feat_every: 200                # steps between feature-rank / attention diagnostics
+ckpt_every_steps: 5000         # steps between rolling resume checkpoints

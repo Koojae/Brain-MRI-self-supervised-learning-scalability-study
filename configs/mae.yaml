@@ -1,0 +1,60 @@
+# MAE ("MAE-96"): masked auto-encoding on whole-volume 96^3 resizes with a light decoder.
+# This template holds the ViT-Base values.  launch.py sets arch, the decoder size, qk_norm,
+# base_lr, index_json, total_steps and run_dir; train.py reads only the resolved file.
+
+method: mae
+
+# ── encoder ──
+arch: base                     # tiny | base | huge (set by launch.py)
+in_chans: 1                    # input channels (one MRI contrast)
+img_size: 96                   # whole volume zero-padded to a cube and resized to img_size^3
+patch_size: 16                 # cubic patch edge; (96 / 16)^3 = 6^3 = 216 tokens
+valid_token_threshold: 0.1     # a token is brain-valid when >= 10% of its voxels are brain
+qk_norm: false                 # per-head LayerNorm on q and k (launch.py: on for ViT-Huge)
+qk_norm_eps: 1.0e-2            # LayerNorm eps of the q/k normalisation
+grad_checkpointing: false      # recompute block activations in backward (memory only)
+
+# ── objective ──
+masking_ratio: 0.75            # fraction of brain-valid tokens hidden from the encoder
+norm_pix_loss: true            # regress per-patch normalised voxel values
+decoder_dim: 256               # decoder width  (tiny 64 / base 256 / huge 512, set by launch.py)
+decoder_depth: 6               # decoder blocks (tiny 4 / base 6 / huge 8)
+decoder_heads: 4               # decoder heads  (tiny 1 / base 4 / huge 8; head_dim 64)
+
+# ── augmentation (GPU, after the resize; probabilities are per sample) ──
+aug:
+  flip_p: 0.5                  # flip probability per spatial axis
+  rotate_p: 0.5                # 90-degree rotation probability per axis pair
+  noise_p: 0.5                 # additive Gaussian noise, std ~ U[0, noise_std]
+  noise_std: 0.05
+  blur_p: 0.5                  # Gaussian blur, sigma ~ U[blur_sigma] voxels
+  blur_sigma: [0.25, 1.0]
+  gamma_p: 0.5                 # gamma contrast, exponent ~ U[gamma]
+  gamma: [0.5, 2.0]
+  hist_shift_p: 0.5            # monotone piecewise-linear intensity remap (10 control points, +-30%)
+
+# ── data ──
+index_json: null               # JSON list of .b2nd volume paths (set by launch.py)
+batch_size_per_gpu: 64         # volumes per GPU per micro-batch
+grad_accum: 1                  # micro-batches per optimizer step
+num_workers: 4                 # DataLoader workers per rank
+
+# ── optimizer (AdamW, eps 1e-8) ──
+base_lr: 1.0e-4                # peak_lr = base_lr * volumes_per_step / 256
+weight_decay: 0.05             # constant; applied to tensors with ndim >= 2 only
+adamw_beta1: 0.9
+adamw_beta2: 0.95
+patch_embed_lr_mult: 0.2       # learning-rate multiplier of the patch embedding
+clip_grad: 3.0                 # global gradient-norm clip, every step
+
+# ── schedule ──
+warmup_frac: 0.1               # linear warm-up over this fraction of total_steps
+min_lr: 1.0e-6                 # absolute floor of the cosine decay
+total_steps: null              # optimizer steps (set by launch.py from --epochs)
+
+# ── run ──
+run_dir: null                  # output directory (set by launch.py)
+seed: 42                       # base seed; each rank uses seed + rank
+log_every: 20                  # steps between log lines
+feat_every: 200                # steps between feature-rank / attention diagnostics
+ckpt_every_steps: 5000         # steps between rolling resume checkpoints

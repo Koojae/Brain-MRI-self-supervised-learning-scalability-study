@@ -1,0 +1,7 @@
+# Pinned to the versions the study was run with (Python 3.11).
+# torch: the CUDA 12.8 build was used (reported by torch as 2.11.0+cu128); install the
+# build that matches your CUDA driver from https://pytorch.org.
+torch==2.11.0
+numpy==2.4.4
+blosc2==4.7.0
+PyYAML==6.0.3
